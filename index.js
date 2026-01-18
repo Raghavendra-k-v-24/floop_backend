@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
+import bodyParser from "body-parser";
 
 // import { authenticate } from "./middleware/auth.js";
 import {
@@ -26,7 +27,7 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization"],
   }),
 );
-app.use(express.json());
+app.use(bodyParser.json());
 
 app.post("/api/signup", async (req, res) => {
   try {
