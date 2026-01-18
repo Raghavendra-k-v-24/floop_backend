@@ -113,6 +113,12 @@ const reviewSchema = new mongoose.Schema(
       enum: ["view", "comment"],
       default: "view",
     },
+    accessToken: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+    },
     intent: {
       type: String,
       enum: ["reviewee", "reviewer"],
