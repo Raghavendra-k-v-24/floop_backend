@@ -5,7 +5,7 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
 
-import { authenticate } from "./middleware/auth.js";
+// import { authenticate } from "./middleware/auth.js";
 import {
   User,
   Portfolio,
