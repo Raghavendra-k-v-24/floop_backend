@@ -85,7 +85,6 @@ const reviewSchema = new mongoose.Schema(
     revieweeId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true,
     },
     createdByUserId: {
       type: mongoose.Schema.Types.ObjectId,
