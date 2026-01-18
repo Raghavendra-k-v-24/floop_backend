@@ -19,7 +19,13 @@ dotenv.config();
 
 const app = express();
 
-app.use(cors());
+app.use(
+  cors({
+    origin: ["https://www.floop.design", "http://localhost:5173"],
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  }),
+);
 app.use(express.json());
 
 app.post("/api/signup", async (req, res) => {
@@ -87,7 +93,7 @@ app.post("/api/login", async (req, res) => {
       .status(201)
       .json({ message: "User created successfully", token });
   } catch (err) {
-    console.error("Signing up user error:", err);
+    console.error("Logging in user error:", err);
     return res.status(500).json({ message: "Internal server error" });
   }
 });
