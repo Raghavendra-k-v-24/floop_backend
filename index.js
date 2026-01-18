@@ -6,7 +6,8 @@ import bcrypt from "bcrypt";
 import crypto from "crypto";
 import bodyParser from "body-parser";
 
-// import { authenticate } from "./middleware/auth.js";
+import { authenticate } from "./middleware/auth.js";
+
 import {
   User,
   Portfolio,
