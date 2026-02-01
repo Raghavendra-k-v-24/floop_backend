@@ -59,6 +59,9 @@ const portfolioSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    portfolioImage: {
+      type: String,
+    },
     isOpened: {
       type: Boolean,
       default: false,
@@ -159,7 +162,7 @@ const pinSchema = new mongoose.Schema(
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true,
+      required: false,
     },
   },
   { timestamps: { createdAt: true, updatedAt: false } },
@@ -177,7 +180,7 @@ const commentSchema = new mongoose.Schema(
     authorId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true,
+      required: false,
       index: true,
     },
 
@@ -229,16 +232,16 @@ const eventSchema = new mongoose.Schema(
 );
 
 //model
-const User = mongoose.model("user", userSchema, "user");
+const User = mongoose.model("User", userSchema, "user");
 
-const Portfolio = mongoose.model("portfolio", portfolioSchema, "portfolio");
+const Portfolio = mongoose.model("Portfolio", portfolioSchema, "portfolio");
 
-const Review = mongoose.model("review", reviewSchema, "review");
+const Review = mongoose.model("Review", reviewSchema, "review");
 
-const Pin = mongoose.model("pin", pinSchema, "pin");
+const Pin = mongoose.model("Pin", pinSchema, "pin");
 
-const Comment = mongoose.model("comment", commentSchema, "comment");
+const Comment = mongoose.model("Comment", commentSchema, "comment");
 
-const Event = mongoose.model("event", eventSchema, "event");
+const Event = mongoose.model("Event", eventSchema, "event");
 
 export { User, Portfolio, Review, Pin, Comment, Event };
