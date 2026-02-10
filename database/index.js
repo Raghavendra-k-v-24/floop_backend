@@ -159,6 +159,14 @@ const pinSchema = new mongoose.Schema(
       type: String,
     },
 
+    textHint: {
+      type: String,
+    },
+
+    tagName: {
+      type: String,
+    },
+
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

@@ -62,8 +62,6 @@ async function getImage(portfolioLink) {
   const bucket = process.env.AWS_S3_BUCKET_NAME;
   const key = `screenshots/${urlToHashedS3Key(portfolioLink)}.png`;
 
-  // const imageUrl = `https://${bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
-
   try {
     await s3
       .headObject({
@@ -240,13 +238,13 @@ app.post("/api/portfolio", authenticate, async (req, res) => {
     const ownerUserId = intent === "reviewee" ? req.userId : null;
     const createdByUserId = req.userId;
 
-    const { imageUrl } = await getImage(portfolioLink);
+    const { key, cached } = await getImage(portfolioLink);
 
     const portfolio = new Portfolio({
       ownerUserId,
       createdByUserId,
       portfolioLink,
-      portfolioImage: imageUrl,
+      portfolioImage: key,
     });
     await portfolio.save();
 
@@ -357,7 +355,7 @@ app.get("/api/review", authenticate, async (req, res) => {
             $concat: [
               process.env.BASE_URL_CLIENT,
               "/review/",
-              { $toString: "$_id" },
+              { $toString: "$accessToken" },
             ],
           },
         },
@@ -426,12 +424,12 @@ app.post("/api/review", authenticate, async (req, res) => {
 
     const user = await User.findById(userId);
 
-    // 🔐 Validate intent against capability
-    if (!user.role.includes(intent)) {
-      return res.status(403).json({
-        message: `User cannot create review as ${intent}`,
-      });
-    }
+    // // 🔐 Validate intent against capability
+    // if (!user.role.includes(intent)) {
+    //   return res.status(403).json({
+    //     message: `User cannot create review as ${intent}`,
+    //   });
+    // }
 
     let revieweeId = null;
     let reviewerId = null;
@@ -462,6 +460,8 @@ app.post("/api/review", authenticate, async (req, res) => {
       }
     }
 
+    const accessToken = crypto.randomBytes(24).toString("hex");
+
     const review = await Review.create({
       portfolioId,
       createdByUserId: userId,
@@ -469,7 +469,7 @@ app.post("/api/review", authenticate, async (req, res) => {
       revieweeId,
       reviewerId,
       invitedReviewerEmail,
-      accessToken: crypto.randomBytes(24).toString("hex"),
+      accessToken,
     });
 
     return res.status(201).json({
@@ -535,59 +535,134 @@ app.put("/api/review", authenticate, async (req, res) => {
   }
 });
 
+// app.get("/api/proxy", async (req, res) => {
+//   const { url, reviewId, token } = req.query;
+
+//   if (!url || !reviewId) {
+//     return res.status(400).send("Missing url or reviewId");
+//   }
+
+//   try {
+//     const response = await axios.get(url, {
+//       responseType: "arraybuffer",
+//       headers: { "User-Agent": "Mozilla/5.0" },
+//       timeout: 15000,
+//     });
+
+//     const contentType = response.headers["content-type"] || "";
+//     res.setHeader("Content-Type", contentType);
+
+//     // Non-HTML → passthrough
+//     if (!contentType.includes("text/html")) {
+//       return res.send(response.data);
+//     }
+
+//     const html = response.data.toString("utf8");
+//     const $ = cheerio.load(html);
+//     const baseUrl = new URL(url);
+
+//     // Rewrite only <a> navigation
+//     $("a[href]").each((_, el) => {
+//       const href = $(el).attr("href");
+//       if (!href || href.startsWith("#") || href.startsWith("mailto:")) return;
+
+//       const absolute = href.startsWith("http")
+//         ? href
+//         : new URL(href, baseUrl).toString();
+
+//       $(el).attr(
+//         "href",
+//         `/api/proxy?url=${encodeURIComponent(absolute)}&reviewId=${reviewId}`,
+//       );
+//     });
+
+//     // Inject overlay
+//     $("head").append(`
+//       <script>
+//         window.__FLOOP__ = {
+//           reviewId: "${reviewId}",
+//           token: "${token || ""}"
+//         };
+//       </script>
+//       <script src="${process.env.BASE_URL_CLIENT}/overlay.js" defer></script>
+//     `);
+
+//     res.send($.html());
+//   } catch (err) {
+//     console.error("Proxy error:", err.message);
+//     res.status(500).send("Proxy failed");
+//   }
+// });
+
 app.get("/api/proxy", async (req, res) => {
-  const { url, reviewId, token } = req.query;
+  const { url, reviewId } = req.query;
 
   if (!url || !reviewId) {
     return res.status(400).send("Missing url or reviewId");
   }
 
   try {
-    const response = await axios.get(url, {
-      responseType: "arraybuffer",
-      headers: { "User-Agent": "Mozilla/5.0" },
-      timeout: 15000,
+    const response = await axios({
+      url,
+      method: "GET",
+      responseType: "stream",
+      timeout: 8000,
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+      },
     });
 
     const contentType = response.headers["content-type"] || "";
-    res.setHeader("Content-Type", contentType);
 
-    // Non-HTML → passthrough
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("X-Frame-Options", "ALLOWALL");
+    res.setHeader("Content-Security-Policy", "frame-ancestors *;");
+
+    // ✅ NON HTML → stream directly
     if (!contentType.includes("text/html")) {
-      return res.send(response.data);
+      return response.data.pipe(res);
     }
 
-    const html = response.data.toString("utf8");
-    const $ = cheerio.load(html);
-    const baseUrl = new URL(url);
+    // Convert stream → string ONLY for HTML
+    let html = "";
 
-    // Rewrite only <a> navigation
-    $("a[href]").each((_, el) => {
-      const href = $(el).attr("href");
-      if (!href || href.startsWith("#") || href.startsWith("mailto:")) return;
-
-      const absolute = href.startsWith("http")
-        ? href
-        : new URL(href, baseUrl).toString();
-
-      $(el).attr(
-        "href",
-        `/api/proxy?url=${encodeURIComponent(absolute)}&reviewId=${reviewId}`,
-      );
+    response.data.on("data", (chunk) => {
+      html += chunk.toString();
     });
 
-    // Inject overlay
-    $("head").append(`
-      <script>
-        window.__FLOOP__ = {
-          reviewId: "${reviewId}",
-          token: "${token || ""}"
-        };
-      </script>
-      <script src="${process.env.BASE_URL_CLIENT}/overlay.js" defer></script>
-    `);
+    response.data.on("end", () => {
+      const $ = cheerio.load(html);
+      const baseUrl = new URL(url);
 
-    res.send($.html());
+      // ⭐ MAGIC LINE
+      $("head").prepend(`<base href="${baseUrl.origin}">`);
+
+      // Rewrite navigation only
+      $("a[href]").each((_, el) => {
+        const href = $(el).attr("href");
+
+        if (!href || href.startsWith("#") || href.startsWith("mailto:")) return;
+
+        const absolute = href.startsWith("http")
+          ? href
+          : new URL(href, baseUrl).toString();
+
+        $(el).attr(
+          "href",
+          `/api/proxy?url=${encodeURIComponent(absolute)}&reviewId=${reviewId}`,
+        );
+      });
+
+      // Inject overlay
+      $("head").append(`
+        <script>
+          window.__FLOOP__ = { reviewId: "${reviewId}", apiBase: "${process.env.BASE_URL_SERVER}" };
+        </script>
+        <script src="${process.env.BASE_URL_CLIENT}/overlay.js" defer></script>
+      `);
+
+      res.send($.html());
+    });
   } catch (err) {
     console.error("Proxy error:", err.message);
     res.status(500).send("Proxy failed");
@@ -597,12 +672,13 @@ app.get("/api/proxy", async (req, res) => {
 // generating proxy url for frontend
 app.get("/api/review/:id/view", async (req, res) => {
   try {
-    const reviewId = req.params.id;
+    const accessToken = req.params.id;
     const userId = req.userId || null;
 
-    const review = await Review.findById(reviewId)
+    const review = await Review.findOne({ accessToken })
       .populate("portfolioId", "portfolioLink")
-      .populate("revieweeId", "name email");
+      .populate("revieweeId", "name email")
+      .populate("reviewerId", "name email");
 
     if (!review) {
       return res.status(404).json({ message: "Review not found" });
@@ -619,6 +695,7 @@ app.get("/api/review/:id/view", async (req, res) => {
     //   return res.status(403).json({ message: "Access denied" });
     // }
     const revieweeName = review.revieweeId?.name || "Unknown";
+    const reviewerName = review.reviewerId?.name || "Unknown";
 
     // ✅ Build proxy URL (frontend never does this)
     const proxyUrl =
@@ -627,6 +704,7 @@ app.get("/api/review/:id/view", async (req, res) => {
     return res.json({
       proxyUrl,
       revieweeName,
+      reviewerName,
       portfolioLink: review.portfolioId.portfolioLink,
     });
   } catch (err) {
@@ -636,7 +714,8 @@ app.get("/api/review/:id/view", async (req, res) => {
 });
 
 app.post("/api/pin", async (req, res) => {
-  const { reviewId, pageUrl, x, y, comment, token } = req.body;
+  const { reviewId, pageUrl, x, y, selector, comment, textHint, tagName } =
+    req.body;
 
   // if (!(await canAccessReview(reviewId, req.userId, token))) {
   //   return res.status(403).json({ message: "Access denied" });
@@ -646,6 +725,9 @@ app.post("/api/pin", async (req, res) => {
     reviewId,
     pageUrl,
     position: { x, y },
+    selector,
+    textHint,
+    tagName,
     createdBy: req.userId || null,
   });
 
@@ -673,12 +755,12 @@ app.get("/api/pin", async (req, res) => {
     // group comments by pinId
     const commentMap = {};
     comments.forEach((c) => {
-      commentMap[c.pinId] = c;
+      commentMap[c.pinId.toString()] = c;
     });
 
     const result = pins.map((p) => ({
       ...p,
-      comment: commentMap[p._id]?.content || "",
+      comment: commentMap[p._id.toString()]?.content || "",
     }));
 
     res.json(result);
