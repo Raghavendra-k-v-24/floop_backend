@@ -24,6 +24,7 @@ import {
   Comment,
   Event,
 } from "./database/index.js";
+import { logEvent } from "./utils/logEvent.js";
 
 dotenv.config();
 
@@ -137,6 +138,11 @@ app.post("/api/signup", async (req, res) => {
     });
     await user.save();
 
+    await logEvent({
+      userId: user._id,
+      event: "USER_REGISTERED",
+    });
+
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, {
       expiresIn: "1d",
     });
@@ -247,6 +253,12 @@ app.post("/api/portfolio", authenticate, async (req, res) => {
       portfolioImage: key,
     });
     await portfolio.save();
+
+    await logEvent({
+      userId: req.userId,
+      portfolioId: portfolio._id,
+      event: "PORTFOLIO_CREATED",
+    });
 
     return res
       .status(201)
@@ -472,6 +484,16 @@ app.post("/api/review", authenticate, async (req, res) => {
       accessToken,
     });
 
+    await logEvent({
+      userId: req.userId,
+      portfolioId,
+      reviewId: review._id,
+      event: "REVIEW_SHARED",
+      metadata: {
+        invitedEmail: invitedReviewerEmail,
+      },
+    });
+
     return res.status(201).json({
       message: "Review created successfully",
       review,
@@ -684,6 +706,33 @@ app.get("/api/review/:id/view", async (req, res) => {
       return res.status(404).json({ message: "Review not found" });
     }
 
+    if (review.revieweeId) {
+      const FIVE_MIN = 1000 * 60 * 5;
+
+      const existing = await Event.findOne({
+        userId: review.revieweeId,
+        reviewId: review._id,
+        event: "PORTFOLIO_OPENED",
+        "metadata.actorId": review.reviewerId || null,
+      }).sort({ createdAt: -1 });
+
+      const shouldLog =
+        !existing ||
+        Date.now() - new Date(existing.createdAt).getTime() > FIVE_MIN;
+
+      if (shouldLog) {
+        await logEvent({
+          userId: review.revieweeId,
+          portfolioId: review.portfolioId,
+          reviewId: review._id,
+          event: "PORTFOLIO_OPENED",
+          metadata: {
+            actorId: review.reviewerId || null,
+          },
+        });
+      }
+    }
+
     // // 🔐 Access check
     // const isLoggedInAllowed =
     //   userId &&
@@ -731,11 +780,41 @@ app.post("/api/pin", async (req, res) => {
     createdBy: req.userId || null,
   });
 
+  await logEvent({
+    userId: req.userId || null,
+    reviewId,
+    event: "PIN_ADDED",
+  });
+
   await Comment.create({
     pinId: pin._id,
     authorId: req.userId || null,
     content: comment,
   });
+
+  const review = await Review.findById(reviewId);
+
+  if (req.userId) {
+    await logEvent({
+      userId: req.userId,
+      portfolioId: review.portfolioId,
+      reviewId,
+      event: "COMMENT_ADDED",
+    });
+  }
+
+  if (review.revieweeId) {
+    await logEvent({
+      userId: review.revieweeId,
+      portfolioId: review.portfolioId,
+      reviewId,
+      event: "COMMENT_RECEIVED",
+      metadata: {
+        actorId: review.reviewerId || null,
+        actorEmail: review.invitedReviewerEmail || null,
+      },
+    });
+  }
 
   res.status(201).json({ pin });
 });
@@ -766,6 +845,504 @@ app.get("/api/pin", async (req, res) => {
     res.json(result);
   } catch (err) {
     res.status(500).json({ message: "Failed to load pins" });
+  }
+});
+
+app.get("/api/dashboard/stats", authenticate, async (req, res) => {
+  try {
+    const userId = new mongoose.Types.ObjectId(req.userId);
+
+    // Received
+    const received = await Review.aggregate([
+      { $match: { revieweeId: userId } },
+      {
+        $lookup: {
+          from: "pin",
+          localField: "_id",
+          foreignField: "reviewId",
+          as: "pins",
+        },
+      },
+      { $unwind: { path: "$pins", preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: "comment",
+          localField: "pins._id",
+          foreignField: "pinId",
+          as: "comments",
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          reviews: { $addToSet: "$_id" },
+          comments: { $sum: { $size: "$comments" } },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          reviewCount: { $size: "$reviews" },
+          commentCount: "$comments",
+        },
+      },
+    ]);
+
+    // Given
+    const given = await Review.aggregate([
+      { $match: { reviewerId: userId } },
+      {
+        $lookup: {
+          from: "pin",
+          localField: "_id",
+          foreignField: "reviewId",
+          as: "pins",
+        },
+      },
+      { $unwind: { path: "$pins", preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: "comment",
+          localField: "pins._id",
+          foreignField: "pinId",
+          as: "comments",
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          reviews: { $addToSet: "$_id" },
+          comments: { $sum: { $size: "$comments" } },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          reviewCount: { $size: "$reviews" },
+          commentCount: "$comments",
+        },
+      },
+    ]);
+
+    res.json({
+      received: received[0] || { reviewCount: 0, commentCount: 0 },
+      given: given[0] || { reviewCount: 0, commentCount: 0 },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch stats" });
+  }
+});
+
+app.get("/api/activity", authenticate, async (req, res) => {
+  try {
+    const userId = new mongoose.Types.ObjectId(req.userId);
+    const { type } = req.query; // received | given
+
+    //////////////////////////////////////////////////////
+    // ⭐ GROUP SIMILAR EVENTS (5 min window)
+    //////////////////////////////////////////////////////
+
+    const match =
+      type === "given"
+        ? {
+            userId,
+            event: {
+              $in: [
+                "REVIEW_SHARED",
+                "COMMENT_ADDED",
+                "PIN_ADDED",
+                "PORTFOLIO_CREATED",
+              ],
+            },
+          }
+        : {
+            userId,
+            event: {
+              $in: ["COMMENT_RECEIVED", "PORTFOLIO_OPENED"],
+            },
+          };
+
+    const events = await Event.aggregate([
+      { $match: match },
+
+      {
+        $lookup: {
+          from: "portfolio",
+          localField: "portfolioId",
+          foreignField: "_id",
+          as: "portfolio",
+        },
+      },
+      { $unwind: { path: "$portfolio", preserveNullAndEmptyArrays: true } },
+
+      {
+        $lookup: {
+          from: "user",
+          localField: "metadata.actorId",
+          foreignField: "_id",
+          as: "actor",
+        },
+      },
+      { $unwind: { path: "$actor", preserveNullAndEmptyArrays: true } },
+
+      {
+        $project: {
+          event: 1,
+          metadata: 1,
+          createdAt: 1,
+          portfolioLink: "$portfolio.portfolioLink",
+          actorName: "$actor.name",
+        },
+      },
+
+      // ⭐ HARD DEDUPE
+      {
+        $group: {
+          _id: "$_id",
+          doc: { $first: "$$ROOT" },
+        },
+      },
+      { $replaceRoot: { newRoot: "$doc" } },
+
+      { $sort: { createdAt: -1 } },
+      { $limit: 50 },
+    ]);
+
+    const GROUP_WINDOW = 1000 * 60 * 5;
+
+    const groupedEvents = [];
+
+    events.forEach((event) => {
+      // ⭐ find matching group
+      const group = groupedEvents.find((g) => {
+        const sameEvent = g.event === event.event;
+        const sameActor = g.actorName === event.actorName;
+        const samePortfolio = g.portfolioLink === event.portfolioLink;
+
+        const withinWindow =
+          Math.abs(new Date(g.createdAt) - new Date(event.createdAt)) <
+          GROUP_WINDOW;
+
+        return (
+          sameEvent &&
+          sameActor &&
+          samePortfolio &&
+          withinWindow &&
+          ["PORTFOLIO_OPENED", "COMMENT_RECEIVED"].includes(event.event)
+        );
+      });
+
+      if (group) {
+        group.count += 1;
+
+        // ⭐ keep latest timestamp for UI
+        if (new Date(event.createdAt) > new Date(group.createdAt)) {
+          group.createdAt = event.createdAt;
+        }
+
+        return;
+      }
+
+      groupedEvents.push({
+        ...event,
+        count: 1,
+      });
+    });
+
+    //////////////////////////////////////////////////////
+    // ⭐ FORMAT MESSAGE (BACKEND DOES UX MAGIC)
+    //////////////////////////////////////////////////////
+
+    const formatted = groupedEvents.map((e) => {
+      let message = "";
+
+      switch (e.event) {
+        case "USER_REGISTERED":
+          message = "You created an account";
+          break;
+
+        case "PORTFOLIO_CREATED":
+          message = `You created portfolio ${e.portfolioLink}`;
+          break;
+
+        case "REVIEW_SHARED":
+          message = `You shared ${e.portfolioLink} for review`;
+          break;
+
+        case "PORTFOLIO_OPENED":
+          message = `${e.actorName || "Someone"} opened ${e.portfolioLink}${
+            e.count > 1 ? ` ${e.count} times` : ""
+          }`;
+          break;
+
+        case "COMMENT_ADDED":
+          message = `You added a comment on ${e.portfolioLink}`;
+          break;
+
+        case "COMMENT_RECEIVED":
+          message = `${
+            e.actorName || e.metadata?.actorEmail || "Someone"
+          } commented on ${e.portfolioLink} ${e.count > 1 ? ` ${e.count} times` : ""}`;
+          break;
+
+        case "PIN_ADDED":
+          message = `You added feedback on ${e.portfolioLink}`;
+          break;
+
+        default:
+          message = e.event;
+      }
+
+      return {
+        message,
+        event: e.event,
+        createdAt: e.createdAt,
+      };
+    });
+
+    //////////////////////////////////////////////////////
+    // ⭐ GROUPING (timeline)
+    //////////////////////////////////////////////////////
+
+    const now = new Date();
+
+    const startToday = new Date(now);
+    startToday.setHours(0, 0, 0, 0);
+
+    const startYesterday = new Date(startToday);
+    startYesterday.setDate(startYesterday.getDate() - 1);
+
+    const startWeek = new Date(startToday);
+    startWeek.setDate(startWeek.getDate() - 7);
+
+    const grouped = {
+      today: [],
+      yesterday: [],
+      thisWeek: [],
+      earlier: [],
+    };
+
+    formatted.forEach((e) => {
+      const d = new Date(e.createdAt);
+
+      if (d >= startToday) grouped.today.push(e);
+      else if (d >= startYesterday) grouped.yesterday.push(e);
+      else if (d >= startWeek) grouped.thisWeek.push(e);
+      else grouped.earlier.push(e);
+    });
+
+    res.json(grouped);
+  } catch (err) {
+    console.error("Activity fetch error", err);
+    res.status(500).json({ message: "Failed to fetch activity" });
+  }
+});
+
+app.get("/api/review/:accessToken/activity", async (req, res) => {
+  try {
+    //////////////////////////////////////////////////////
+    // ⭐ Resolve review from accessToken
+    //////////////////////////////////////////////////////
+
+    const review = await Review.findOne({
+      accessToken: req.params.accessToken,
+    })
+      .populate("revieweeId", "_id name")
+      .populate("reviewerId", "_id name")
+      .populate("portfolioId", "portfolioLink");
+
+    if (!review) {
+      return res.status(404).json({ message: "Review not found" });
+    }
+
+    const reviewId = review._id;
+
+    //////////////////////////////////////////////////////
+    // ⭐ Viewer context
+    //////////////////////////////////////////////////////
+
+    const viewerId = req.userId
+      ? new mongoose.Types.ObjectId(req.userId)
+      : null;
+
+    const isReviewer =
+      viewerId && review.reviewerId && viewerId.equals(review.reviewerId._id);
+
+    const isReviewee =
+      viewerId && review.revieweeId && viewerId.equals(review.revieweeId._id);
+
+    //////////////////////////////////////////////////////
+    // ⭐ Fetch events for THIS review
+    //////////////////////////////////////////////////////
+
+    const events = await Event.aggregate([
+      { $match: { reviewId } },
+
+      // portfolio
+      {
+        $lookup: {
+          from: "portfolio",
+          localField: "portfolioId",
+          foreignField: "_id",
+          as: "portfolio",
+        },
+      },
+      { $unwind: { path: "$portfolio", preserveNullAndEmptyArrays: true } },
+
+      // actor
+      {
+        $lookup: {
+          from: "user",
+          localField: "metadata.actorId",
+          foreignField: "_id",
+          as: "actor",
+        },
+      },
+      { $unwind: { path: "$actor", preserveNullAndEmptyArrays: true } },
+
+      {
+        $project: {
+          event: 1,
+          metadata: 1,
+          createdAt: 1,
+          portfolioLink: "$portfolio.portfolioLink",
+          actorName: "$actor.name",
+        },
+      },
+
+      { $sort: { createdAt: -1 } },
+      { $limit: 50 },
+    ]);
+
+    //////////////////////////////////////////////////////
+    // ⭐ GROUP EVENTS (5 min)
+    //////////////////////////////////////////////////////
+
+    const GROUP_WINDOW = 1000 * 60 * 5;
+    const groupedEvents = [];
+
+    events.forEach((event) => {
+      const group = groupedEvents.find((g) => {
+        const sameEvent = g.event === event.event;
+        const sameActor = g.actorName === event.actorName;
+        const samePortfolio = g.portfolioLink === event.portfolioLink;
+
+        const withinWindow =
+          Math.abs(new Date(g.createdAt) - new Date(event.createdAt)) <
+          GROUP_WINDOW;
+
+        return (
+          sameEvent &&
+          sameActor &&
+          samePortfolio &&
+          withinWindow &&
+          ["PORTFOLIO_OPENED", "COMMENT_RECEIVED", "COMMENT_ADDED"].includes(
+            event.event,
+          )
+        );
+      });
+
+      if (group) {
+        group.count += 1;
+
+        if (new Date(event.createdAt) > new Date(group.createdAt)) {
+          group.createdAt = event.createdAt;
+        }
+
+        return;
+      }
+
+      groupedEvents.push({ ...event, count: 1 });
+    });
+
+    //////////////////////////////////////////////////////
+    // ⭐ FORMAT (viewer aware)
+    //////////////////////////////////////////////////////
+
+    const formatted = groupedEvents.map((e) => {
+      let message = "";
+
+      const actorId = e.metadata?.actorId;
+      const isActorViewer = viewerId && actorId && viewerId.equals(actorId);
+
+      switch (e.event) {
+        case "PORTFOLIO_OPENED":
+          message = `${e.actorName || "Someone"} opened portfolio${
+            e.count > 1 ? ` ${e.count} times` : ""
+          }`;
+          break;
+
+        case "COMMENT_ADDED":
+          message = `${
+            isActorViewer ? "You" : e.actorName || "Someone"
+          } added comment${e.count > 1 ? ` ${e.count} times` : ""}`;
+          break;
+
+        case "COMMENT_RECEIVED":
+          message = `${
+            isActorViewer
+              ? "You"
+              : e.actorName || e.metadata?.actorEmail || "Someone"
+          } commented${e.count > 1 ? ` ${e.count} times` : ""}`;
+          break;
+
+        case "PIN_ADDED":
+          message = `${isActorViewer ? "You" : e.actorName || "Someone"} added feedback`;
+          break;
+
+        case "REVIEW_SHARED":
+          message = isReviewer
+            ? "You shared review link"
+            : "Review link shared";
+          break;
+
+        default:
+          message = e.event;
+      }
+
+      return {
+        message,
+        event: e.event,
+        createdAt: e.createdAt,
+      };
+    });
+
+    //////////////////////////////////////////////////////
+    // ⭐ TIME GROUPING
+    //////////////////////////////////////////////////////
+
+    const now = new Date();
+
+    const startToday = new Date(now);
+    startToday.setHours(0, 0, 0, 0);
+
+    const startYesterday = new Date(startToday);
+    startYesterday.setDate(startYesterday.getDate() - 1);
+
+    const startWeek = new Date(startToday);
+    startWeek.setDate(startWeek.getDate() - 7);
+
+    const grouped = {
+      today: [],
+      yesterday: [],
+      thisWeek: [],
+      earlier: [],
+    };
+
+    formatted.forEach((e) => {
+      const d = new Date(e.createdAt);
+
+      if (d >= startToday) grouped.today.push(e);
+      else if (d >= startYesterday) grouped.yesterday.push(e);
+      else if (d >= startWeek) grouped.thisWeek.push(e);
+      else grouped.earlier.push(e);
+    });
+
+    res.json(grouped);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch review activity" });
   }
 });
 

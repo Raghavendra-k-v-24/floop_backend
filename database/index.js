@@ -207,6 +207,38 @@ const commentSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// const eventSchema = new mongoose.Schema(
+//   {
+//     userId: {
+//       type: mongoose.Schema.Types.ObjectId,
+//       ref: "User",
+//       index: true,
+//     },
+
+//     portfolioId: {
+//       type: mongoose.Schema.Types.ObjectId,
+//       ref: "Portfolio",
+//       index: true,
+//     },
+
+//     reviewId: {
+//       type: mongoose.Schema.Types.ObjectId,
+//       ref: "Review",
+//     },
+
+//     event: {
+//       type: String,
+//       required: true,
+//       // e.g. USER_REGISTERED, REVIEW_INVITED, COMMENT_ADDED
+//     },
+
+//     metadata: {
+//       type: mongoose.Schema.Types.Mixed,
+//     },
+//   },
+//   { timestamps: { createdAt: true, updatedAt: false } },
+// );
+
 const eventSchema = new mongoose.Schema(
   {
     userId: {
@@ -229,11 +261,19 @@ const eventSchema = new mongoose.Schema(
     event: {
       type: String,
       required: true,
-      // e.g. USER_REGISTERED, REVIEW_INVITED, COMMENT_ADDED
     },
 
-    metadata: {
-      type: mongoose.Schema.Types.Mixed,
+    metadata: mongoose.Schema.Types.Mixed,
+
+    count: {
+      type: Number,
+      default: 1,
+    },
+
+    seen: {
+      type: Boolean,
+      default: false,
+      index: true,
     },
   },
   { timestamps: { createdAt: true, updatedAt: false } },
