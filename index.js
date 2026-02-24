@@ -1346,6 +1346,81 @@ app.get("/api/review/:accessToken/activity", async (req, res) => {
   }
 });
 
+app.get("/api/review/:accessToken/comments", async (req, res) => {
+  try {
+    //////////////////////////////////////////////////////
+    // ⭐ Resolve reviewId from accessToken
+    //////////////////////////////////////////////////////
+
+    const review = await Review.findOne(
+      { accessToken: req.params.accessToken },
+      { _id: 1 },
+    );
+
+    if (!review) {
+      return res.status(404).json({ message: "Review not found" });
+    }
+
+    //////////////////////////////////////////////////////
+    // ⭐ Fetch comments (latest first)
+    //////////////////////////////////////////////////////
+
+    const comments = await Comment.aggregate([
+      // Join pin → filter by review
+      {
+        $lookup: {
+          from: "pin",
+          localField: "pinId",
+          foreignField: "_id",
+          as: "pin",
+        },
+      },
+      { $unwind: "$pin" },
+
+      {
+        $match: {
+          "pin.reviewId": review._id,
+        },
+      },
+
+      // Join author
+      {
+        $lookup: {
+          from: "user",
+          localField: "authorId",
+          foreignField: "_id",
+          as: "author",
+        },
+      },
+      { $unwind: { path: "$author", preserveNullAndEmptyArrays: true } },
+
+      //////////////////////////////////////////////////////
+      // ⭐ FRONTEND READY SHAPE
+      //////////////////////////////////////////////////////
+      {
+        $project: {
+          _id: 1,
+          text: "$content",
+          author: {
+            $ifNull: ["$author.name", "Guest reviewer"],
+          },
+          createdAt: 1,
+        },
+      },
+
+      //////////////////////////////////////////////////////
+      // ⭐ IMPORTANT → latest first
+      //////////////////////////////////////////////////////
+      { $sort: { createdAt: -1 } },
+    ]);
+
+    res.json(comments);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch comments" });
+  }
+});
+
 app.listen(3000, () => {
   console.log("Server is running at port 3000");
 });
